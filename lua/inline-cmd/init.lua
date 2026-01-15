@@ -17,6 +17,8 @@ local config = require("inline-cmd.defaults")
 
 local M = {}
 
+local runningJobs = {}
+
 ---@param parserName string
 ---@return SingleLangComments
 local function getLangComments(parserName)
@@ -38,13 +40,12 @@ local function getLangComments(parserName)
 	end
 
 	local comments = {}
-	local seen = {} -- avoid duplicates
+	local seen = {}
 
 	for id, node, _ in query:iter_captures(root, bufnr, start_line, end_line) do
 		local captureName = query.captures[id]
 
 		if captureName:match("^comment") then
-			-- only take the *outermost* comment nodes
 			local parent = node:parent()
 			if parent and parent:type():match("comment") then
 				goto continue
@@ -55,7 +56,6 @@ local function getLangComments(parserName)
 			if not seen[key] then
 				seen[key] = true
 
-				---@type Comment
 				local comment = {
 					content = vim.treesitter.get_node_text(node, bufnr),
 					startRow = sr,
@@ -74,7 +74,6 @@ local function getLangComments(parserName)
 	return comments
 end
 
-
 ---@return boolean
 local function isTextBuffer()
 	return vim.bo.buftype == ""
@@ -89,7 +88,6 @@ local function getFileComments()
 	local ftLang = vim.treesitter.language.get_lang(vim.bo.ft)
 	local langs = config.langRemapOverride[ftLang] or { ftLang }
 
-	---@type FileComments
 	local commentsPerLanguage = {}
 	for _, lang in ipairs(langs) do
 		commentsPerLanguage[lang] = getLangComments(lang)
@@ -107,7 +105,10 @@ local function inlineComment(comment)
 
 	local bufnr = vim.api.nvim_get_current_buf()
 
-	vim.fn.jobstart(cmd, {
+	-- make sure we have a table for this buffer
+	runningJobs[bufnr] = runningJobs[bufnr] or {}
+
+	local jobId = vim.fn.jobstart(cmd, {
 		shell = true,
 		stdout_buffered = false,
 		on_stdout = function(_, data, _)
@@ -146,6 +147,8 @@ local function inlineComment(comment)
 			end)
 		end,
 	})
+
+	runningJobs[bufnr][jobId] = true
 end
 
 ---@param lang ParserLanguage
@@ -157,6 +160,18 @@ local function inlineLangComments(lang, comments)
 end
 
 local function run()
+	local bufnr = vim.api.nvim_get_current_buf()
+
+	-- kill all running jobs for this buffer
+	if runningJobs[bufnr] then
+		for job_id, _ in pairs(runningJobs[bufnr]) do
+			if vim.fn.jobwait({job_id}, 0)[1] == -1 then
+				vim.fn.jobstop(job_id)
+			end
+			runningJobs[bufnr][job_id] = nil
+		end
+	end
+
 	local fileComments = getFileComments()
 	for lang, comments in pairs(fileComments) do
 		inlineLangComments(lang, comments)
@@ -185,14 +200,14 @@ function M.setup(opts)
 			enabled = true
 			vim.notify("inline-cmd enabled", vim.log.levels.INFO)
 		end
-	, {})
+		, {})
 
 	vim.api.nvim_create_user_command("InlineCmdDisable",
 		function ()
 			enabled = false
 			vim.notify("inline-cmd disabled", vim.log.levels.INFO)
 		end
-	, {})
+		, {})
 end
 
 return M
