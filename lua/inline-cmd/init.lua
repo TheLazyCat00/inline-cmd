@@ -112,10 +112,9 @@ local function inlineComment(comment)
 		shell = true,
 		stdout_buffered = false,
 		on_stdout = function(_, data, _)
+			vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
 			vim.schedule(function()
 				if not data then return end
-
-				vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
 
 				local output = {}
 				for _, line in ipairs(data) do
