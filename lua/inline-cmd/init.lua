@@ -1,7 +1,6 @@
 local ns = vim.api.nvim_create_namespace("inline-cmd")
 local enabled = true
 
----  $Inline[make]
 ---@type Config
 local config = require("inline-cmd.defaults")
 
