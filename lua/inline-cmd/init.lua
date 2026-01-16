@@ -110,6 +110,7 @@ local function inlineComment(comment)
 
 	local jobId = vim.fn.jobstart(cmd, {
 		shell = true,
+		cwd = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":h"),
 		stdout_buffered = false,
 		on_stdout = function(_, data, _)
 			vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
