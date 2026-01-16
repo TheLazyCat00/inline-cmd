@@ -1,6 +1,7 @@
 local ns = vim.api.nvim_create_namespace("inline-cmd")
 local enabled = true
 
+---  $Inline[make]
 ---@type Config
 local config = require("inline-cmd.defaults")
 
@@ -204,13 +205,11 @@ end
 function M.setup(opts)
 	config = vim.tbl_deep_extend("force", config, opts)
 
-	vim.api.nvim_create_autocmd("WinEnter", {
-		callback = runDispatch
-	})
-
-	vim.api.nvim_create_autocmd("BufWrite", {
-		callback = runDispatch
-	})
+	for _, event in ipairs(config.events) do
+		vim.api.nvim_create_autocmd(event, {
+			callback = runDispatch
+		})
+	end
 
 	vim.api.nvim_create_user_command("InlineCmdEnable",
 		function ()
