@@ -108,43 +108,60 @@ local function inlineComment(comment)
 	-- make sure we have a table for this buffer
 	runningJobs[bufnr] = runningJobs[bufnr] or {}
 
+	local outputs = { stdout = {}, stderr = {} }
+	local function updateVirtText()
+		vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
+		vim.schedule(function()
+			local virt_lines = {}
+
+			for _, line in ipairs(outputs.stdout) do
+				table.insert(virt_lines, { { line, "Comment" } })
+			end
+
+			for _, line in ipairs(outputs.stderr) do
+				table.insert(virt_lines, { { line, "ErrorMsg" } })
+			end
+
+			vim.api.nvim_buf_set_extmark(bufnr, ns, comment.endRow, 0, {
+				virt_lines = virt_lines,
+				virt_lines_above = false,
+			})
+		end)
+	end
+
 	local jobId = vim.fn.jobstart(cmd, {
 		shell = true,
 		cwd = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":h"),
 		stdout_buffered = false,
 		on_stdout = function(_, data, _)
-			vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
-			vim.schedule(function()
-				if not data then return end
+			if not data then return end
 
-				local output = {}
-				for _, line in ipairs(data) do
-					if line ~= "" then
-						table.insert(output, line)
-					end
+			local output = {}
+			for _, line in ipairs(data) do
+				if line ~= "" then
+					table.insert(output, line)
 				end
+			end
 
-				if #output == 0 then return end
+			if #output == 0 then return end
+			outputs.stdout = output
 
-				local virt_lines = {}
-				for _, line in ipairs(output) do
-					table.insert(virt_lines, { { line, "Comment" } })
-				end
-
-				vim.api.nvim_buf_set_extmark(bufnr, ns, comment.endRow, 0, {
-					virt_lines = virt_lines,
-					virt_lines_above = false,
-				})
-			end)
+			updateVirtText()
 		end,
 		on_stderr = function(_, data, _)
-			vim.schedule(function()
-				if not data then return end
-				local errors = vim.tbl_filter(function(l) return l ~= "" end, data)
-				if #errors > 0 then
-					vim.notify("Error: " .. table.concat(errors, "\n"), vim.log.levels.ERROR)
+			if not data then return end
+
+			local output = {}
+			for _, line in ipairs(data) do
+				if line ~= "" then
+					table.insert(output, line)
 				end
-			end)
+			end
+
+			if #output == 0 then return end
+			outputs.stderr = output
+
+			updateVirtText()
 		end,
 	})
 
