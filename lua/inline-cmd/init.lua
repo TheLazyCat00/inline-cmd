@@ -1,8 +1,12 @@
-local ns = vim.api.nvim_create_namespace("inline-cmd")
 local enabled = true
+local namespaces = {}
 
 ---@type Config
 local config = require("inline-cmd.defaults")
+
+---@class CommentAndLanguage
+---@field comment Comment
+---@field language ParserLanguage
 
 ---@alias ParserLanguage string
 ---@class Comment
@@ -12,15 +16,25 @@ local config = require("inline-cmd.defaults")
 ---@field endRow integer
 ---@field endColumn integer
 
----@alias SingleLangComments Comment[]
----@alias FileComments table<ParserLanguage, SingleLangComments>
+---@alias FileComments CommentAndLanguage[]
 
 local M = {}
 
 local runningJobs = {}
 
+---@param tbl table
+---@return integer
+local function size(tbl)
+	local count = 0
+	for _ in pairs(tbl) do
+		count = count + 1
+	end
+
+	return count
+end
+
 ---@param parserName string
----@return SingleLangComments
+---@return Comment[]
 local function getLangComments(parserName)
 	local bufnr = 0
 	local start_line = 0
@@ -88,16 +102,26 @@ local function getFileComments()
 	local ftLang = vim.treesitter.language.get_lang(vim.bo.ft)
 	local langs = config.langRemapOverride[ftLang] or { ftLang }
 
-	local commentsPerLanguage = {}
+	---@type CommentAndLanguage[]
+	local commentsAndLanguage = {}
 	for _, lang in ipairs(langs) do
-		commentsPerLanguage[lang] = getLangComments(lang)
+		for _, comment in ipairs(getLangComments(lang)) do
+			---@type CommentAndLanguage
+			local commentAndLanguage = {
+				comment = comment,
+				language = lang,
+			}
+			table.insert(commentsAndLanguage, commentAndLanguage)
+		end
 	end
 
-	return commentsPerLanguage
+	return commentsAndLanguage
 end
 
 ---@param comment Comment
-local function inlineComment(comment)
+---@param lang string
+---@param index integer
+local function inlineComment(comment, lang, index)
 	local cmd = comment.content:match(config.runPattern)
 	if not cmd or cmd == "" then
 		return
@@ -110,22 +134,57 @@ local function inlineComment(comment)
 
 	local outputs = { stdout = {}, stderr = {} }
 	local function updateVirtText()
-		vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
+		local nsName = "" .. lang .. index .. ""
+		local nsId = namespaces[nsName] or vim.api.nvim_create_namespace(nsName)
+		namespaces[nsName] = nsId
+
 		vim.schedule(function()
-			local virt_lines = {}
+			vim.api.nvim_buf_clear_namespace(bufnr, nsId, 0, -1)
+			local virtLines = {}
 
 			for _, line in ipairs(outputs.stdout) do
-				table.insert(virt_lines, { { line, "Comment" } })
+				table.insert(virtLines, { { line, config.hl.output } })
 			end
 
 			for _, line in ipairs(outputs.stderr) do
-				table.insert(virt_lines, { { line, "ErrorMsg" } })
+				table.insert(virtLines, { { line, config.hl.error } })
 			end
 
-			vim.api.nvim_buf_set_extmark(bufnr, ns, comment.endRow, 0, {
-				virt_lines = virt_lines,
-				virt_lines_above = false,
-			})
+			local totalLines = vim.api.nvim_buf_line_count(bufnr)
+			local startRow = comment.endRow + 1
+			local endRow = startRow
+
+			while endRow <= totalLines do
+				local line = vim.api.nvim_buf_get_lines(bufnr, endRow, endRow + 1, false)[1]
+
+				if line ~= "" then
+					break
+				end
+
+				endRow = endRow + 1
+			end
+
+			if endRow > startRow then
+				vim.api.nvim_buf_set_lines(bufnr, startRow, endRow, false, {})  -- Remove +1
+			end
+
+			local emptyLines = {}
+			for _ = 1, #virtLines + config.paddingAtEnd do
+				table.insert(emptyLines, "")
+			end
+			vim.api.nvim_buf_set_lines(bufnr, startRow, startRow, false, emptyLines)
+
+			for index, line in ipairs(virtLines) do
+				if index > totalLines then return end
+				local currentRow = comment.endRow + index
+				vim.api.nvim_buf_set_extmark(bufnr, nsId, currentRow, 0, {
+					virt_text = line,
+					virt_text_pos = "eol",
+					virt_text_repeat_linebreak = true
+				})
+			end
+
+			config.onInline()
 		end)
 	end
 
@@ -168,30 +227,26 @@ local function inlineComment(comment)
 	runningJobs[bufnr][jobId] = true
 end
 
----@param lang ParserLanguage
----@param comments SingleLangComments
-local function inlineLangComments(lang, comments)
-	for _, comment in ipairs(comments) do
-		inlineComment(comment)
-	end
-end
-
 local function run()
 	local bufnr = vim.api.nvim_get_current_buf()
 
 	-- kill all running jobs for this buffer
 	if runningJobs[bufnr] then
-		for job_id, _ in pairs(runningJobs[bufnr]) do
-			if vim.fn.jobwait({job_id}, 0)[1] == -1 then
-				vim.fn.jobstop(job_id)
+		for jobId, _ in pairs(runningJobs[bufnr]) do
+			if vim.fn.jobwait({jobId}, 0)[1] == -1 then
+				vim.fn.jobstop(jobId)
 			end
-			runningJobs[bufnr][job_id] = nil
+			runningJobs[bufnr][jobId] = nil
 		end
 	end
 
 	local fileComments = getFileComments()
-	for lang, comments in pairs(fileComments) do
-		inlineLangComments(lang, comments)
+	table.sort(fileComments, function(a, b)
+		return a.comment.endRow > b.comment.endRow
+	end)
+
+	for index, commentAndLang in ipairs(fileComments) do
+		inlineComment(commentAndLang.comment, commentAndLang.language, index)
 	end
 end
 
