@@ -7,7 +7,7 @@
 ---@field runPattern string
 ---@field langRemapOverride table<string, string[]>
 ---@field hl HighlightGroups
----@field onInline fun()
+---@field onModifyBuffer fun()
 ---@field paddingAtEnd integer
 return {
 	events = { "WinEnter", "BufWrite" },
@@ -17,7 +17,7 @@ return {
 		output = "Comment",
 		error = "ErrorMsg"
 	},
-	onInline = function ()
+	onModifyBuffer = function ()
 		vim.cmd("noautocmd write")
 	end,
 	paddingAtEnd = 1

@@ -1,6 +1,7 @@
 ---@class CmdOutput
 ---@field stdout string[]
 ---@field stderr string[]
+---@field finished boolean
 
 ---@class CmdInfo
 ---@field namespace integer?
@@ -10,6 +11,8 @@
 ---@type table<integer, table<integer, CmdInfo>>
 local cmds = {}
 local enabled = true
+
+---@type table<integer, table<integer, integer>>
 local runningJobs = {}
 
 ---@type Config
@@ -135,7 +138,8 @@ end
 ---@param cmdIndex integer
 ---@param row integer
 ---@param bufnr integer
-local function updateVirtText(cmdIndex, row, bufnr)
+---@param onModifyBuffer fun()
+local function updateVirtText(cmdIndex, row, bufnr, onModifyBuffer)
 	local bufferCmds = cmds[bufnr]
 	local currentCmd = bufferCmds[cmdIndex]
 
@@ -168,27 +172,40 @@ local function updateVirtText(cmdIndex, row, bufnr)
 			endRow = endRow + 1
 		end
 
-		if endRow > startRow then
-			vim.api.nvim_buf_set_lines(bufnr, startRow, endRow, false, {})  -- Remove +1
+
+		local function applyVirtualLines()
+			for index, line in ipairs(virtLines) do
+				local currentRow = row + index
+				if currentRow > totalLines then return end
+				vim.api.nvim_buf_set_extmark(bufnr, nsId, currentRow, 0, {
+					virt_text = line,
+					virt_text_pos = "eol",
+					virt_text_repeat_linebreak = true
+				})
+			end
 		end
 
-		local emptyLines = {}
-		for _ = 1, #virtLines + config.paddingAtEnd do
-			table.insert(emptyLines, "")
-		end
-		vim.api.nvim_buf_set_lines(bufnr, startRow, startRow, false, emptyLines)
-
-		for index, line in ipairs(virtLines) do
-			if index > totalLines then return end
-			local currentRow = row + index
-			vim.api.nvim_buf_set_extmark(bufnr, nsId, currentRow, 0, {
-				virt_text = line,
-				virt_text_pos = "eol",
-				virt_text_repeat_linebreak = true
-			})
+		local mode = vim.api.nvim_get_mode().mode
+		local inInsert = mode:sub(1, 1) == "i"
+		if inInsert then
+			applyVirtualLines()
 		end
 
-		config.onInline()
+		local newCmdEnding = #virtLines + row + config.paddingAtEnd + 1
+		if endRow < newCmdEnding then
+			local amountNewLines = newCmdEnding - endRow
+			local emptyLines = {}
+			for _ = 1, amountNewLines do
+				table.insert(emptyLines, "")
+			end
+			vim.api.nvim_buf_set_lines(bufnr, endRow, endRow, false, emptyLines)
+			onModifyBuffer()
+		elseif endRow > newCmdEnding then
+			vim.api.nvim_buf_set_lines(bufnr, newCmdEnding, endRow, false, {})
+			onModifyBuffer()
+		end
+
+		applyVirtualLines()
 	end)
 end
 
@@ -213,24 +230,37 @@ local function inlineComment(comment, lang, index, forceUpdate, bufnr)
 	---@type CmdInfo
 	local currentCmd = bufferCmds[index]
 
-	if reuseOldOutput and currentCmd and currentCmd.cmd == cmd then
-		if currentCmd.output then
-			updateVirtText(index, comment.endRow, bufnr)
+	if reuseOldOutput and currentCmd  then
+		if currentCmd.cmd == cmd and currentCmd.output.finished then
+			updateVirtText(index, comment.endRow, bufnr, config.onModifyBuffer)
+			return
+		else
+			local jobId = runningJobs[bufnr][index]
+			if vim.fn.jobwait({jobId}, 0)[1] == -1 then
+				vim.fn.jobstop(jobId)
+			end
 		end
-		return
 	end
 
 	currentCmd = {
 		namespace = nil,
 		cmd = cmd,
-		output = { stdout = {}, stderr = {} }
+		output = {stdout = {}, stderr = {}, finished = false }
 	}
 	bufferCmds[index] = currentCmd
+
+	local modifiedBuffer = false
 
 	local jobId = vim.fn.jobstart(cmd, {
 		shell = true,
 		cwd = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":h"),
 		stdout_buffered = false,
+		on_exit = function ()
+			currentCmd.output.finished = true
+			if modifiedBuffer then
+				config.onModifyBuffer()
+			end
+		end,
 		on_stdout = function(_, data, _)
 			if not data then return end
 
@@ -244,7 +274,9 @@ local function inlineComment(comment, lang, index, forceUpdate, bufnr)
 			if #output == 0 then return end
 			currentCmd.output.stdout = output
 
-			updateVirtText(index, comment.endRow, bufnr)
+			updateVirtText(index, comment.endRow, bufnr, function ()
+				modifiedBuffer = true
+			end)
 		end,
 		on_stderr = function(_, data, _)
 			if not data then return end
@@ -259,26 +291,18 @@ local function inlineComment(comment, lang, index, forceUpdate, bufnr)
 			if #output == 0 then return end
 			currentCmd.output.stderr = output
 
-			updateVirtText(index, comment.endRow, bufnr)
+			updateVirtText(index, comment.endRow, bufnr, function ()
+				modifiedBuffer = true
+			end)
 		end,
 	})
 
-	runningJobs[bufnr][jobId] = true
+	runningJobs[bufnr][index] = jobId
 end
 
 ---@param forceUpdate boolean
 local function run(forceUpdate)
 	local bufnr = vim.api.nvim_get_current_buf()
-
-	-- kill all running jobs for this buffer
-	if runningJobs[bufnr] then
-		for jobId, _ in pairs(runningJobs[bufnr]) do
-			if vim.fn.jobwait({jobId}, 0)[1] == -1 then
-				vim.fn.jobstop(jobId)
-			end
-			runningJobs[bufnr][jobId] = nil
-		end
-	end
 
 	local fileComments = getFileComments(bufnr)
 	table.sort(fileComments, function(a, b)

@@ -1,9 +1,12 @@
 aslkdjfj
 
+
 new text
 
 
-<!-- $Inline"[cat README.md]" -->
+<!-- $Inline"[brew remove raylib]" -->
 
+
+<!-- $Inline"[echo hi]" -->
 
 
