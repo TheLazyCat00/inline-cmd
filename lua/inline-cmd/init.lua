@@ -47,14 +47,14 @@ local function size(tbl)
 end
 
 ---@param parserName string
+---@param bufnr integer
 ---@return Comment[]
-local function getLangComments(parserName)
-	local bufnr = 0
-	local start_line = 0
-	local end_line = -1
+local function getLangComments(parserName, bufnr)
+	local startLine = 0
+	local endLine = -1
 
-	local _, parser = pcall(vim.treesitter.get_parser, bufnr, parserName)
-	if parser == nil then
+	local ok, parser = pcall(vim.treesitter.get_parser, bufnr, parserName)
+	if not ok or parser == nil then
 		return {}
 	end
 
@@ -69,7 +69,7 @@ local function getLangComments(parserName)
 	local comments = {}
 	local seen = {}
 
-	for id, node, _ in query:iter_captures(root, bufnr, start_line, end_line) do
+	for id, node, _ in query:iter_captures(root, bufnr, startLine, endLine) do
 		local captureName = query.captures[id]
 
 		if captureName:match("^comment") then
@@ -106,8 +106,9 @@ local function isTextBuffer()
 	return vim.bo.buftype == ""
 end
 
+---@param bufnr integer
 ---@return FileComments
-local function getFileComments()
+local function getFileComments(bufnr)
 	if not isTextBuffer() then
 		return {}
 	end
@@ -118,7 +119,7 @@ local function getFileComments()
 	---@type CommentAndLanguage[]
 	local commentsAndLanguage = {}
 	for _, lang in ipairs(langs) do
-		for _, comment in ipairs(getLangComments(lang)) do
+		for _, comment in ipairs(getLangComments(lang, bufnr)) do
 			---@type CommentAndLanguage
 			local commentAndLanguage = {
 				comment = comment,
@@ -131,12 +132,14 @@ local function getFileComments()
 	return commentsAndLanguage
 end
 
-local function updateVirtText(index, row)
-	local bufnr = vim.api.nvim_get_current_buf()
+---@param cmdIndex integer
+---@param row integer
+---@param bufnr integer
+local function updateVirtText(cmdIndex, row, bufnr)
 	local bufferCmds = cmds[bufnr]
-	local currentCmd = bufferCmds[index]
+	local currentCmd = bufferCmds[cmdIndex]
 
-	local nsId = currentCmd.namespace or vim.api.nvim_create_namespace(bufnr .. "|" .. index)
+	local nsId = currentCmd.namespace or vim.api.nvim_create_namespace(bufnr .. "|" .. cmdIndex)
 	currentCmd.namespace = nsId
 
 	vim.schedule(function()
@@ -192,13 +195,15 @@ end
 ---@param comment Comment
 ---@param lang string
 ---@param index integer
-local function inlineComment(comment, lang, index)
+---@param forceUpdate boolean
+---@param bufnr integer
+local function inlineComment(comment, lang, index, forceUpdate, bufnr)
+	local reuseOldOutput = not forceUpdate
+
 	local cmd = comment.content:match(config.runPattern)
 	if not cmd or cmd == "" then
 		return
 	end
-
-	local bufnr = vim.api.nvim_get_current_buf()
 
 	-- make sure we have a table for this buffer
 	runningJobs[bufnr] = runningJobs[bufnr] or {}
@@ -208,9 +213,9 @@ local function inlineComment(comment, lang, index)
 	---@type CmdInfo
 	local currentCmd = bufferCmds[index]
 
-	if currentCmd and currentCmd.cmd == cmd then
+	if reuseOldOutput and currentCmd and currentCmd.cmd == cmd then
 		if currentCmd.output then
-			updateVirtText(index, comment.endRow)
+			updateVirtText(index, comment.endRow, bufnr)
 		end
 		return
 	end
@@ -239,7 +244,7 @@ local function inlineComment(comment, lang, index)
 			if #output == 0 then return end
 			currentCmd.output.stdout = output
 
-			updateVirtText(index, comment.endRow)
+			updateVirtText(index, comment.endRow, bufnr)
 		end,
 		on_stderr = function(_, data, _)
 			if not data then return end
@@ -254,14 +259,15 @@ local function inlineComment(comment, lang, index)
 			if #output == 0 then return end
 			currentCmd.output.stderr = output
 
-			updateVirtText(index, comment.endRow)
+			updateVirtText(index, comment.endRow, bufnr)
 		end,
 	})
 
 	runningJobs[bufnr][jobId] = true
 end
 
-local function run()
+---@param forceUpdate boolean
+local function run(forceUpdate)
 	local bufnr = vim.api.nvim_get_current_buf()
 
 	-- kill all running jobs for this buffer
@@ -274,14 +280,14 @@ local function run()
 		end
 	end
 
-	local fileComments = getFileComments()
+	local fileComments = getFileComments(bufnr)
 	table.sort(fileComments, function(a, b)
 		return a.comment.endRow > b.comment.endRow
 	end)
 
 	for index, commentAndLang in ipairs(fileComments) do
 		index = #fileComments + 1 - index
-		inlineComment(commentAndLang.comment, commentAndLang.language, index)
+		inlineComment(commentAndLang.comment, commentAndLang.language, index, forceUpdate, bufnr)
 	end
 
 	local bufferCmds = cmds[bufnr] or {}
@@ -293,9 +299,12 @@ local function run()
 	end
 end
 
-local function runDispatch()
+---@param forceUpdate boolean
+local function runDispatch(forceUpdate)
 	if enabled then
-		vim.schedule(run)
+		vim.schedule(function ()
+			run(forceUpdate)
+		end)
 	end
 end
 
@@ -304,7 +313,9 @@ function M.setup(opts)
 
 	for _, event in ipairs(config.events) do
 		vim.api.nvim_create_autocmd(event, {
-			callback = runDispatch
+			callback = function ()
+				runDispatch(false)
+			end
 		})
 	end
 
@@ -319,6 +330,12 @@ function M.setup(opts)
 		function ()
 			enabled = false
 			vim.notify("inline-cmd disabled", vim.log.levels.INFO)
+		end
+		, {})
+
+	vim.api.nvim_create_user_command("InlineCmdUpdate",
+		function ()
+			runDispatch(true)
 		end
 		, {})
 end
