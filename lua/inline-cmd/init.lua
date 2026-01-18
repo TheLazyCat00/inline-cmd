@@ -174,9 +174,10 @@ local function updateVirtText(cmdIndex, row, bufnr, onModifyBuffer)
 
 
 		local function applyVirtualLines()
+			local newTotalLines = vim.api.nvim_buf_line_count(bufnr)
 			for index, line in ipairs(virtLines) do
 				local currentRow = row + index
-				if currentRow > totalLines then return end
+				if currentRow > newTotalLines then return end
 				vim.api.nvim_buf_set_extmark(bufnr, nsId, currentRow, 0, {
 					virt_text = line,
 					virt_text_pos = "eol",
