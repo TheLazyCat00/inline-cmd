@@ -1,5 +1,16 @@
+---@class CmdOutput
+---@field stdout string[]
+---@field stderr string[]
+
+---@class CmdInfo
+---@field namespace integer?
+---@field cmd string
+---@field output CmdOutput?
+
+---@type table<integer, table<integer, CmdInfo>>
+local cmds = {}
 local enabled = true
-local namespaces = {}
+local runningJobs = {}
 
 ---@type Config
 local config = require("inline-cmd.defaults")
@@ -20,7 +31,9 @@ local config = require("inline-cmd.defaults")
 
 local M = {}
 
-local runningJobs = {}
+local function debug(msg)
+	vim.notify(vim.inspect(msg), vim.log.levels.INFO)
+end
 
 ---@param tbl table
 ---@return integer
@@ -118,6 +131,64 @@ local function getFileComments()
 	return commentsAndLanguage
 end
 
+local function updateVirtText(index, row)
+	local bufnr = vim.api.nvim_get_current_buf()
+	local bufferCmds = cmds[bufnr]
+	local currentCmd = bufferCmds[index]
+
+	local nsId = currentCmd.namespace or vim.api.nvim_create_namespace(bufnr .. "|" .. index)
+	currentCmd.namespace = nsId
+
+	vim.schedule(function()
+		vim.api.nvim_buf_clear_namespace(bufnr, nsId, 0, -1)
+		local virtLines = {}
+
+		for _, line in ipairs(currentCmd.output.stdout) do
+			table.insert(virtLines, { { line, config.hl.output } })
+		end
+
+		for _, line in ipairs(currentCmd.output.stderr) do
+			table.insert(virtLines, { { line, config.hl.error } })
+		end
+
+		local totalLines = vim.api.nvim_buf_line_count(bufnr)
+		local startRow = row + 1
+		local endRow = startRow
+
+		while endRow <= totalLines do
+			local line = vim.api.nvim_buf_get_lines(bufnr, endRow, endRow + 1, false)[1]
+
+			if line ~= "" then
+				break
+			end
+
+			endRow = endRow + 1
+		end
+
+		if endRow > startRow then
+			vim.api.nvim_buf_set_lines(bufnr, startRow, endRow, false, {})  -- Remove +1
+		end
+
+		local emptyLines = {}
+		for _ = 1, #virtLines + config.paddingAtEnd do
+			table.insert(emptyLines, "")
+		end
+		vim.api.nvim_buf_set_lines(bufnr, startRow, startRow, false, emptyLines)
+
+		for index, line in ipairs(virtLines) do
+			if index > totalLines then return end
+			local currentRow = row + index
+			vim.api.nvim_buf_set_extmark(bufnr, nsId, currentRow, 0, {
+				virt_text = line,
+				virt_text_pos = "eol",
+				virt_text_repeat_linebreak = true
+			})
+		end
+
+		config.onInline()
+	end)
+end
+
 ---@param comment Comment
 ---@param lang string
 ---@param index integer
@@ -131,62 +202,25 @@ local function inlineComment(comment, lang, index)
 
 	-- make sure we have a table for this buffer
 	runningJobs[bufnr] = runningJobs[bufnr] or {}
+	local bufferCmds = cmds[bufnr] or {}
+	cmds[bufnr] = bufferCmds
 
-	local outputs = { stdout = {}, stderr = {} }
-	local function updateVirtText()
-		local nsName = "" .. lang .. index .. ""
-		local nsId = namespaces[nsName] or vim.api.nvim_create_namespace(nsName)
-		namespaces[nsName] = nsId
+	---@type CmdInfo
+	local currentCmd = bufferCmds[index]
 
-		vim.schedule(function()
-			vim.api.nvim_buf_clear_namespace(bufnr, nsId, 0, -1)
-			local virtLines = {}
-
-			for _, line in ipairs(outputs.stdout) do
-				table.insert(virtLines, { { line, config.hl.output } })
-			end
-
-			for _, line in ipairs(outputs.stderr) do
-				table.insert(virtLines, { { line, config.hl.error } })
-			end
-
-			local totalLines = vim.api.nvim_buf_line_count(bufnr)
-			local startRow = comment.endRow + 1
-			local endRow = startRow
-
-			while endRow <= totalLines do
-				local line = vim.api.nvim_buf_get_lines(bufnr, endRow, endRow + 1, false)[1]
-
-				if line ~= "" then
-					break
-				end
-
-				endRow = endRow + 1
-			end
-
-			if endRow > startRow then
-				vim.api.nvim_buf_set_lines(bufnr, startRow, endRow, false, {})  -- Remove +1
-			end
-
-			local emptyLines = {}
-			for _ = 1, #virtLines + config.paddingAtEnd do
-				table.insert(emptyLines, "")
-			end
-			vim.api.nvim_buf_set_lines(bufnr, startRow, startRow, false, emptyLines)
-
-			for index, line in ipairs(virtLines) do
-				if index > totalLines then return end
-				local currentRow = comment.endRow + index
-				vim.api.nvim_buf_set_extmark(bufnr, nsId, currentRow, 0, {
-					virt_text = line,
-					virt_text_pos = "eol",
-					virt_text_repeat_linebreak = true
-				})
-			end
-
-			config.onInline()
-		end)
+	if currentCmd and currentCmd.cmd == cmd then
+		if currentCmd.output then
+			updateVirtText(index, comment.endRow)
+		end
+		return
 	end
+
+	currentCmd = {
+		namespace = nil,
+		cmd = cmd,
+		output = { stdout = {}, stderr = {} }
+	}
+	bufferCmds[index] = currentCmd
 
 	local jobId = vim.fn.jobstart(cmd, {
 		shell = true,
@@ -203,9 +237,9 @@ local function inlineComment(comment, lang, index)
 			end
 
 			if #output == 0 then return end
-			outputs.stdout = output
+			currentCmd.output.stdout = output
 
-			updateVirtText()
+			updateVirtText(index, comment.endRow)
 		end,
 		on_stderr = function(_, data, _)
 			if not data then return end
@@ -218,9 +252,9 @@ local function inlineComment(comment, lang, index)
 			end
 
 			if #output == 0 then return end
-			outputs.stderr = output
+			currentCmd.output.stderr = output
 
-			updateVirtText()
+			updateVirtText(index, comment.endRow)
 		end,
 	})
 
@@ -246,7 +280,16 @@ local function run()
 	end)
 
 	for index, commentAndLang in ipairs(fileComments) do
+		index = #fileComments + 1 - index
 		inlineComment(commentAndLang.comment, commentAndLang.language, index)
+	end
+
+	local bufferCmds = cmds[bufnr] or {}
+	for index, cmd in ipairs(bufferCmds) do
+		if index > #fileComments then
+			vim.api.nvim_buf_clear_namespace(bufnr, cmd.namespace, 0, -1)
+			cmds[bufnr][index] = nil
+		end
 	end
 end
 
